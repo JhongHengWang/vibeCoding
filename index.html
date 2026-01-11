@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>轟炸潛水艇 - Retro Arcade</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a1a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.5);
+            border: 4px solid #333;
+        }
+
+        canvas {
+            display: block;
+            background-color: #000;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            pointer-events: none;
+            color: #fff;
+            text-shadow: 2px 2px #000;
+            display: flex;
+            justify-content: space-between;
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        #game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.85);
+            padding: 40px;
+            text-align: center;
+            border: 2px solid #FFD700;
+            display: none;
+            color: #fff;
+        }
+
+        #game-over h1 {
+            color: #ff4444;
+            margin-bottom: 20px;
+            font-size: 48px;
+        }
+
+        .btn {
+            background: #FFD700;
+            color: #000;
+            border: none;
+            padding: 15px 30px;
+            font-size: 20px;
+            cursor: pointer;
+            font-weight: bold;
+            text-transform: uppercase;
+            transition: transform 0.2s;
+            pointer-events: auto;
+        }
+
+        .btn:hover {
+            transform: scale(1.1);
+            background: #fff;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <div id="ui-layer">
+            <div id="score-display">SCORE: 0</div>
+            <div id="lives-display">LIVES: 3</div>
+        </div>
+
+        <div id="game-over">
+            <h1>GAME OVER</h1>
+            <p id="final-score">SCORE: 0</p>
+            <button class="btn" onclick="resetGame()">重新開始</button>
+        </div>
+
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+<script>
+    /**
+     * 遊戲常數設定
+     */
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score-display');
+    const livesEl = document.getElementById('lives-display');
+    const gameOverScreen = document.getElementById('game-over');
+    const finalScoreEl = document.getElementById('final-score');
+
+    // 畫布尺寸
+    canvas.width = 800;
+    canvas.height = 600;
+
+    const SKY_HEIGHT = canvas.height * 0.2;
+    const SEA_START = SKY_HEIGHT;
+    
+    // 遊戲狀態
+    let score = 0;
+    let lives = 3;
+    let gameActive = true;
+    let keys = {};
+
+    // 遊戲物件陣列
+    let bombs = [];
+    let subs = [];
+    let torpedoes = [];
+    let explosions = [];
+
+    /**
+     * 玩家物件 (驅逐艦)
+     */
+    const player = {
+        x: canvas.width / 2 - 40,
+        y: SEA_START - 20,
+        width: 80,
+        height: 25,
+        speed: 5,
+        color: '#888',
+        draw() {
+            // 船體
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y + this.height);
+            ctx.lineTo(this.x + this.width, this.y + this.height);
+            ctx.lineTo(this.x + this.width - 10, this.y);
+            ctx.lineTo(this.x + 10, this.y);
+            ctx.closePath();
+            ctx.fill();
+            
+            // 煙囪與細節
+            ctx.fillStyle = '#555';
+            ctx.fillRect(this.x + 30, this.y - 10, 20, 10);
+            ctx.fillStyle = '#333';
+            ctx.fillRect(this.x + 35, this.y - 15, 10, 5);
+        },
+        update() {
+            if (keys['ArrowLeft'] && this.x > 0) this.x -= this.speed;
+            if (keys['ArrowRight'] && this.x < canvas.width - this.width) this.x += this.speed;
+        }
+    };
+
+    /**
+     * 炸彈類別
+     */
+    class Bomb {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.radius = 6;
+            this.speedY = 2;
+            this.gravity = 0.05;
+        }
+        draw() {
+            ctx.fillStyle = '#333';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            // 亮點
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(this.x - 2, this.y - 2, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        update() {
+            this.speedY += this.gravity;
+            this.y += this.speedY;
+        }
+    }
+
+    /**
+     * 潛艇類別
+     */
+    class Submarine {
+        constructor(layer) {
+            this.layer = layer; // 1, 2, 3 層或 4 (黃金)
+            this.isGolden = (layer === 4);
+            
+            this.width = this.isGolden ? 40 : 60;
+            this.height = 20;
+            
+            // 根據層級設定屬性
+            const depths = [0, 100, 220, 340, 420]; // Y 偏移量
+            this.y = SEA_START + depths[layer];
+            
+            const direction = Math.random() > 0.5 ? 1 : -1;
+            this.x = direction === 1 ? -this.width : canvas.width;
+            
+            let baseSpeed = 1 + (layer * 0.8);
+            // 修改：黃金潛艇移動速度改為較緩慢，而非極快
+            if (this.isGolden) baseSpeed = 2.5; 
+            
+            this.speedX = direction * baseSpeed;
+            
+            this.points = this.isGolden ? 200 : [0, 10, 30, 50][layer];
+            this.color = this.isGolden ? '#FFD700' : '#2c3e50';
+            this.flashTimer = 0;
+        }
+
+        draw() {
+            ctx.save();
+            if (this.isGolden) {
+                // 黃金潛艇閃爍效果
+                this.flashTimer += 0.1;
+                const glow = Math.sin(this.flashTimer) * 10 + 10;
+                ctx.shadowBlur = glow;
+                ctx.shadowColor = '#FFF';
+            }
+            
+            // 潛艇主體
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.ellipse(this.x + this.width / 2, this.y + this.height / 2, this.width / 2, this.height / 2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // 潛望鏡
+            ctx.fillRect(this.x + this.width / 2 - 2, this.y - 5, 4, 10);
+            
+            ctx.restore();
+        }
+
+        update() {
+            this.x += this.speedX;
+            
+            // 隨機發射魚雷 (黃金潛艇不發射)
+            if (!this.isGolden && Math.random() < 0.005) {
+                torpedoes.push(new Torpedo(this.x + this.width / 2, this.y));
+            }
+        }
+    }
+
+    /**
+     * 魚雷類別
+     */
+    class Torpedo {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.width = 4;
+            this.height = 12;
+            this.speedY = -3;
+        }
+        draw() {
+            ctx.fillStyle = '#ff4444';
+            ctx.fillRect(this.x - 2, this.y, this.width, this.height);
+            // 泡泡尾跡
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y + 15, 2, 0, Math.PI*2);
+            ctx.fill();
+        }
+        update() {
+            this.y += this.speedY;
+        }
+    }
+
+    /**
+     * 爆炸特效
+     */
+    class Explosion {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.radius = 5;
+            this.timer = 0;
+            this.maxLife = 30; // 約 0.5 秒 (60fps)
+        }
+        draw() {
+            ctx.beginPath();
+            ctx.fillStyle = `rgba(255, ${100 + Math.random() * 155}, 0, ${1 - this.timer / this.maxLife})`;
+            ctx.arc(this.x, this.y, this.radius + this.timer, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        update() {
+            this.timer++;
+        }
+    }
+
+    /**
+     * 繪製背景 (天空與多層海洋)
+     */
+    function drawBackground() {
+        // 天空
+        ctx.fillStyle = '#a0d8ef';
+        ctx.fillRect(0, 0, canvas.width, SKY_HEIGHT);
+        
+        // 海洋層級
+        const layers = 5;
+        const layerHeight = (canvas.height - SKY_HEIGHT) / layers;
+        const colors = ['#0077be', '#0066aa', '#005599', '#004488', '#003377'];
+        
+        for (let i = 0; i < layers; i++) {
+            ctx.fillStyle = colors[i];
+            ctx.fillRect(0, SKY_HEIGHT + (i * layerHeight), canvas.width, layerHeight);
+        }
+
+        // 海浪細節
+        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+        ctx.lineWidth = 2;
+        for (let i = 0; i < canvas.width; i += 40) {
+            ctx.beginPath();
+            ctx.arc(i + (Date.now() / 50) % 40, SEA_START, 10, 0, Math.PI, false);
+            ctx.stroke();
+        }
+    }
+
+    /**
+     * 遊戲主迴圈
+     */
+    function gameLoop() {
+        if (!gameActive) return;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drawBackground();
+
+        // 玩家邏輯
+        player.update();
+        player.draw();
+
+        // 生成潛艇
+        if (Math.random() < 0.015) {
+            // 判定是否生成黃金潛艇 (約 8% 機率)
+            const isGoldenChance = Math.random() < 0.08;
+            if (isGoldenChance) {
+                subs.push(new Submarine(4));
+            } else {
+                subs.push(new Submarine(Math.floor(Math.random() * 3) + 1));
+            }
+        }
+
+        // 深水炸彈邏輯
+        bombs.forEach((bomb, bIdx) => {
+            bomb.update();
+            bomb.draw();
+
+            // 移除出界炸彈
+            if (bomb.y > canvas.height) {
+                bombs.splice(bIdx, 1);
+            }
+
+            // 碰撞判定：炸彈 vs 潛艇
+            subs.forEach((sub, sIdx) => {
+                if (bomb.x > sub.x && bomb.x < sub.x + sub.width &&
+                    bomb.y > sub.y && bomb.y < sub.y + sub.height) {
+                    
+                    // 擊中！
+                    score += sub.points;
+                    if (sub.isGolden) {
+                        lives = Math.min(lives + 1, 5);
+                    }
+                    
+                    explosions.push(new Explosion(bomb.x, bomb.y));
+                    subs.splice(sIdx, 1);
+                    bombs.splice(bIdx, 1);
+                    updateUI();
+                }
+            });
+        });
+
+        // 潛艇邏輯
+        subs.forEach((sub, sIdx) => {
+            sub.update();
+            sub.draw();
+            if (sub.x < -sub.width - 100 || sub.x > canvas.width + 100) {
+                subs.splice(sIdx, 1);
+            }
+        });
+
+        // 魚雷邏輯
+        torpedoes.forEach((torp, tIdx) => {
+            torp.update();
+            torp.draw();
+
+            // 碰撞判定：魚雷 vs 玩家船隻
+            if (torp.x > player.x && torp.x < player.x + player.width &&
+                torp.y > player.y && torp.y < player.y + player.height) {
+                
+                lives--;
+                explosions.push(new Explosion(torp.x, torp.y));
+                torpedoes.splice(tIdx, 1);
+                updateUI();
+                
+                if (lives <= 0) endGame();
+            }
+
+            if (torp.y < SEA_START - 20) torpedoes.splice(tIdx, 1);
+        });
+
+        // 爆炸邏輯
+        explosions.forEach((exp, eIdx) => {
+            exp.update();
+            exp.draw();
+            if (exp.timer >= exp.maxLife) explosions.splice(eIdx, 1);
+        });
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    /**
+     * UI 更新
+     */
+    function updateUI() {
+        scoreEl.textContent = `SCORE: ${score}`;
+        livesEl.textContent = `LIVES: ${lives}`;
+    }
+
+    /**
+     * 遊戲結束與重置
+     */
+    function endGame() {
+        gameActive = false;
+        gameOverScreen.style.display = 'block';
+        finalScoreEl.textContent = `FINAL SCORE: ${score}`;
+    }
+
+    function resetGame() {
+        score = 0;
+        lives = 3;
+        bombs = [];
+        subs = [];
+        torpedoes = [];
+        explosions = [];
+        gameActive = true;
+        gameOverScreen.style.display = 'none';
+        updateUI();
+        gameLoop();
+    }
+
+    /**
+     * 輸入控制
+     */
+    window.addEventListener('keydown', e => {
+        keys[e.code] = true;
+        
+        // 空白鍵投彈 (限制一次最多 3 顆在畫面)
+        if (e.code === 'Space' && gameActive && bombs.length < 3) {
+            bombs.push(new Bomb(player.x + player.width / 2, player.y + player.height));
+        }
+    });
+
+    window.addEventListener('keyup', e => {
+        keys[e.code] = false;
+    });
+
+    // 啟動遊戲
+    window.onload = () => {
+        updateUI();
+        gameLoop();
+    };
+
+</script>
+</body>
+</html>
